@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://*.googleusercontent.com https://lh3.googleusercontent.com; connect-src 'self' https://www.googleapis.com https://*.googleusercontent.com https://lh3.googleusercontent.com https://*.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#2457d6">
+  <meta name="description" content="Fotoarchiv – Fotos in Google Drive mit Tags ordnen, filtern und für Fotoabende zusammenstellen.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Fotoarchiv PWA 4.1.0</title>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">Fotoarchiv</div>
+    <nav>
+      <button data-view="library" class="active">Bibliothek</button>
+      <button data-view="favorites">Favoriten</button>
+      <button data-view="projects">Fotoabende</button>
+      <button data-view="dashboard">Übersicht</button>
+    </nav>
+    <div class="head-actions">
+      <button class="btn install" id="installBtn" hidden>⬇ App installieren</button>
+      <button class="btn" id="driveBtn">☁ Drive</button>
+      <button class="btn icon" id="moreBtn" aria-label="Weitere Optionen">⋯</button>
+    </div>
+  </header>
+  <div class="progressline" id="progress"><div></div></div>
+  <main>
+    <div class="notice" id="httpsNotice" hidden>Für Installation und Google-Anmeldung muss das Fotoarchiv über HTTPS geöffnet werden.</div>
+
+    <section class="view active" id="view-library">
+      <div class="toolbar">
+        <div class="search"><input id="searchInput" placeholder="Fotos suchen …" autocomplete="off"></div>
+        <button class="btn primary" id="addDriveFolderBtn">☁ Drive-Ordner hinzufügen</button>
+      </div>
+      <div class="quickbar" id="quickbar"></div>
+      <div class="filterbar">
+        <div class="filterrow">
+          <span class="label">Filter</span>
+          <div id="activeTagChips"></div>
+          <select class="filter-mode-select" id="tagModeSelect" title="Verknüpfung positiver Tags">
+            <option value="and">UND · alle</option>
+            <option value="or">ODER · einer reicht</option>
+          </select>
+          <input class="tag-input" id="filterTagInput" list="tagSuggestions" placeholder="Tag einschließen …">
+          <input class="tag-input" id="excludeTagInput" list="tagSuggestions" placeholder="Tag ausschließen …">
+          <button class="btn small" id="saveFilterBtn">☆ Speichern</button>
+        </div>
+        <details class="advanced">
+          <summary>Weitere Filter ▾</summary>
+          <div class="advanced-grid">
+            <label><span class="mini-label">Von Jahr</span><input class="field" id="yearFrom" inputmode="numeric"></label>
+            <label><span class="mini-label">Bis Jahr</span><input class="field" id="yearTo" inputmode="numeric"></label>
+            <label><span class="mini-label">Tags</span><select class="field" id="tagState"><option value="all">Alle Fotos</option><option value="untagged">Nur ohne Tags</option><option value="tagged">Nur mit Tags</option></select></label>
+            <label><span class="mini-label">Fotoabend</span><select class="field" id="projectFilter"><option value="">Alle Fotos</option></select></label>
+            <div><span class="mini-label">Schnellfilter</span><button class="btn small" id="manageQuickFilters">Verwalten</button></div>
+          </div>
+        </details>
+      </div>
+      <div class="subbar"><span id="resultCount">0 Fotos</span><span class="spacer"></span><select id="sortSelect"><option value="dateDesc">Neueste zuerst</option><option value="dateAsc">Älteste zuerst</option><option value="nameAsc">Dateiname A–Z</option><option value="nameDesc">Dateiname Z–A</option><option value="tagsDesc">Meiste Tags</option></select><button class="btn small" id="viewToggle">▦ Galerie</button></div>
+      <div id="libraryContent"></div>
+    </section>
+
+    <section class="view" id="view-favorites"><div class="page-title"><div><h1>Favoriten</h1><p>Gespeicherte Filter aktualisieren sich automatisch.</p></div></div><div id="favoritesContent"></div></section>
+    <section class="view" id="view-projects"><div id="projectsContent"></div></section>
+    <section class="view" id="view-dashboard"><div class="page-title"><div><h1>Übersicht</h1><p>Ein kompakter Blick auf die Fotosammlung.</p></div></div><div id="dashboardContent"></div></section>
+  </main>
+</div>
+
+<datalist id="tagSuggestions"></datalist>
+<div class="selection" id="selectionBar">
+  <span class="count" id="selectionCount">0 ausgewählt</span>
+  <input id="bulkTagInput" list="tagSuggestions" placeholder="Tag hinzufügen …">
+  <button id="bulkTagAdd">Tag hinzufügen</button>
+  <button id="bulkTagRemove">Tag entfernen</button>
+  <button class="primary" id="createProjectBtn">Fotoabend</button>
+  <button id="clearSelection">×</button>
+</div>
+<div class="modal-back" id="modalBack"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+<div class="version-footer">Fotoarchiv PWA v4.1.0</div>
+<input type="file" id="restoreInput" accept="application/json,.json" hidden>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
