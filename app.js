@@ -1,13 +1,16 @@
 (()=>{'use strict';
-const APP_VERSION='4.1.0',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
+const APP_VERSION='4.2.0',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)],fmt=new Intl.NumberFormat('de-DE'),fmtDate=new Intl.DateTimeFormat('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'});
 const state={db:null,photos:[],libraries:[],favorites:[],projects:[],selected:new Set(),activeTags:new Set(),excludedTags:new Set(),tagMode:'and',search:'',yearFrom:'',yearTo:'',tagState:'all',projectFilterId:'',sort:'dateDesc',listView:false,renderLimit:PAGE_SIZE,activeView:'library',activeProjectId:null,toastTimer:null,driveToken:'',driveExpiresAt:0,installPrompt:null,thumbLoading:false};
 function readRuntimeConfig(){
   let saved={};try{saved=JSON.parse(localStorage.getItem('fa_runtime_config')||'{}')||{}}catch{}
-  return {...(window.FOTOARCHIV_CONFIG||{}),...saved};
+  return {...(window.FOTOARCHIV_CONFIG||{}),googleClientId:saved.googleClientId||(window.FOTOARCHIV_CONFIG?.googleClientId||'')};
 }
 let cfg=readRuntimeConfig();
-function saveRuntimeConfig(next){cfg={...cfg,...next};localStorage.setItem('fa_runtime_config',JSON.stringify({googleClientId:cfg.googleClientId||'',oauthBrokerUrl:cfg.oauthBrokerUrl||''}));}
+function saveRuntimeConfig(next){
+  cfg={...cfg,...next};
+  localStorage.setItem('fa_runtime_config',JSON.stringify({googleClientId:cfg.googleClientId||''}));
+}
 function uid(){return crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now().toString(36)}
 function esc(s=''){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function norm(s){return String(s??'').normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF]/g,'').trim().replace(/\s+/gu,' ').toLocaleLowerCase('de-DE')}
@@ -39,31 +42,72 @@ window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();state.insta
 window.addEventListener('appinstalled',()=>{$('#installBtn').hidden=true;state.installPrompt=null;toast('Fotoarchiv wurde installiert.')});
 async function installApp(){if(state.installPrompt){state.installPrompt.prompt();await state.installPrompt.userChoice;state.installPrompt=null;$('#installBtn').hidden=true;return}openModal(`<h2>App installieren</h2><p>Wenn die App installierbar ist, zeigt Chrome im Browsermenü außerdem <strong>App installieren</strong> bzw. <strong>Zum Startbildschirm hinzufügen</strong>.</p><p class="muted">Der eigene Installationsknopf erscheint automatisch, sobald Chrome die Installierbarkeit bestätigt.</p><div class="modal-footer"><button class="btn" id="modalClose">Schließen</button></div>`);$('#modalClose').onclick=closeModal}
 
-// Google Drive auth + API (Authorization Code + PKCE)
-function brokerBase(){return String(cfg.oauthBrokerUrl||'').trim().replace(/\/$/,'')}
-function driveConfigured(){return !!String(cfg.googleClientId||'').trim()&&!!brokerBase()}
-function tokenValid(){return state.driveToken&&state.driveExpiresAt>Date.now()+60_000}
-function randomBase64Url(bytes=48){const a=new Uint8Array(bytes);crypto.getRandomValues(a);let bin='';for(const b of a)bin+=String.fromCharCode(b);return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
-async function sha256Base64Url(text){const d=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));let bin='';for(const b of new Uint8Array(d))bin+=String.fromCharCode(b);return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
-function oauthRedirectUri(){return new URL('./oauth-callback.html',location.href).href.split('?')[0].split('#')[0]}
-async function connectDrive(after='drive-menu'){
-  if(!driveConfigured()){showDriveSetup();throw new Error('Google OAuth ist noch nicht vollständig eingerichtet.');}
-  const verifier=randomBase64Url(64),challenge=await sha256Base64Url(verifier),oauthState=randomBase64Url(32);
-  sessionStorage.setItem('fa_oauth_verifier',verifier);sessionStorage.setItem('fa_oauth_state',oauthState);sessionStorage.setItem('fa_oauth_return',new URL('./',location.href).href);sessionStorage.setItem('fa_after_oauth',after);
-  const u=new URL('https://accounts.google.com/o/oauth2/v2/auth');
-  u.searchParams.set('client_id',String(cfg.googleClientId).trim());u.searchParams.set('redirect_uri',oauthRedirectUri());u.searchParams.set('response_type','code');u.searchParams.set('scope','https://www.googleapis.com/auth/drive.readonly');u.searchParams.set('include_granted_scopes','true');u.searchParams.set('state',oauthState);u.searchParams.set('code_challenge',challenge);u.searchParams.set('code_challenge_method','S256');u.searchParams.set('access_type','online');
-  location.assign(u.toString());
+// Google Identity Services: direktes Browser-Tokenmodell, ohne Backend/Cloudflare.
+// Das kurzlebige Token wird bewusst nur im Arbeitsspeicher gehalten.
+function driveConfigured(){return !!String(cfg.googleClientId||'').trim()}
+function tokenValid(){return !!state.driveToken&&state.driveExpiresAt>Date.now()+60_000}
+let googleTokenClient=null;
+let googleTokenClientFor='';
+let requestedDriveAction='drive-menu';
+function connectDrive(after='drive-menu'){
+  if(!driveConfigured()){showDriveSetup();toast('Bitte zuerst die Google Client-ID einrichten.',4500);return}
+  const oauth=window.google?.accounts?.oauth2;
+  if(!oauth?.initTokenClient){toast('Die Google-Anmeldung lädt noch. Bitte kurz warten und erneut tippen.',4500);return}
+  requestedDriveAction=after;
+  try{
+    if(!googleTokenClient||googleTokenClientFor!==cfg.googleClientId){
+      googleTokenClient=oauth.initTokenClient({
+        client_id:String(cfg.googleClientId).trim(),
+        scope:'https://www.googleapis.com/auth/drive.readonly',
+        callback:(response)=>{
+          if(response?.error||!response?.access_token){
+            toast('Google-Anmeldung nicht abgeschlossen. '+(response?.error_description||response?.error||''),5000);return;
+          }
+          state.driveToken=response.access_token;
+          state.driveExpiresAt=Date.now()+Math.max(0,Number(response.expires_in||3600))*1000;
+          renderDriveButton();closeModal();toast('Google Drive ist verbunden.');
+          if(requestedDriveAction==='choose-folder') chooseDriveFolder();
+          else driveMenu();
+        },
+        error_callback:(err)=>{
+          const detail=err?.type==='popup_closed'?'Das Google-Fenster wurde geschlossen.':err?.type==='popup_failed_to_open'?'Chrome hat das Google-Anmeldefenster blockiert.':'Bitte die Google-Anmeldung erneut versuchen.';
+          toast(detail,5000);
+        }
+      });
+      googleTokenClientFor=cfg.googleClientId;
+    }
+    // Direkt im Klick-Ereignis aufrufen: wichtig für Popup-Blocker auf Android.
+    googleTokenClient.requestAccessToken({prompt:'select_account'});
+  }catch(err){console.error(err);toast('Google-Anmeldung konnte nicht gestartet werden.',5000)}
 }
 async function ensureDrive(){if(tokenValid())return state.driveToken;throw new Error('Google Drive ist nicht verbunden. Bitte oben auf „☁ Drive“ tippen und erneut verbinden.')}
-async function driveFetch(url){const t=await ensureDrive();const r=await fetch(url,{headers:{Authorization:`Bearer ${t}`}});if(r.status===401){state.driveToken='';state.driveExpiresAt=0;sessionStorage.removeItem('fa_drive_token');sessionStorage.removeItem('fa_drive_exp');renderDriveButton();throw new Error('Die Google-Sitzung ist abgelaufen. Bitte Drive erneut verbinden.')}return r}
+async function driveFetch(url){
+  const t=await ensureDrive();
+  const r=await fetch(url,{headers:{Authorization:`Bearer ${t}`}});
+  if(r.status===401){state.driveToken='';state.driveExpiresAt=0;renderDriveButton();throw new Error('Die Google-Sitzung ist abgelaufen. Bitte Drive erneut verbinden.')}
+  return r;
+}
 async function driveJSON(url){const r=await driveFetch(url),d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d?.error?.message||`Google Drive HTTP ${r.status}`);return d}
 function renderDriveButton(){$('#driveBtn').textContent=tokenValid()?'☁ Drive ✓':'☁ Drive'}
 function showDriveSetup(){
-  const redirect=oauthRedirectUri();
-  openModal(`<h2>Google Drive einrichten</h2><p>Für die sichere Anmeldung werden die öffentliche Google Client-ID und die Adresse des OAuth-Brokers benötigt.</p><label style="display:block;margin-top:10px"><span class="mini-label">Google OAuth Client-ID</span><input class="field" id="setupClientId" value="${esc(cfg.googleClientId||'')}" placeholder="…apps.googleusercontent.com"></label><label style="display:block;margin-top:10px"><span class="mini-label">OAuth-Broker (Cloudflare Worker)</span><input class="field" id="setupBroker" value="${esc(cfg.oauthBrokerUrl||'')}" placeholder="https://…workers.dev"></label><div class="panel" style="margin-top:12px;padding:12px"><strong>Google Redirect-URI</strong><div class="muted" style="font-size:12px;word-break:break-all;margin-top:4px">${esc(redirect)}</div></div><p class="muted" style="font-size:13px">Der Google Client-Secret darf niemals hier oder auf GitHub eingetragen werden. Er gehört nur als Secret in den OAuth-Broker.</p><div class="modal-footer"><button class="btn" id="openSetupGuide">Einrichtungs-Assistent</button><button class="btn" id="modalClose">Abbrechen</button><button class="btn primary" id="saveDriveSetup">Speichern</button></div>`);
-  $('#modalClose').onclick=closeModal;$('#openSetupGuide').onclick=()=>location.href='./SETUP.html';$('#saveDriveSetup').onclick=()=>{saveRuntimeConfig({googleClientId:$('#setupClientId').value.trim(),oauthBrokerUrl:$('#setupBroker').value.trim().replace(/\/$/,'')});closeModal();toast(driveConfigured()?'Google-Drive-Einrichtung gespeichert.':'Einrichtung gespeichert. Es fehlen noch Angaben.');renderDriveButton();};
+  openModal(`<h2>Google Drive einrichten</h2><p>Die Google-Anmeldung funktioniert direkt im Browser. Cloudflare oder ein Client-Secret sind nicht nötig.</p><label style="display:block;margin-top:10px"><span class="mini-label">Google OAuth Client-ID</span><input class="field" id="setupClientId" value="${esc(cfg.googleClientId||'')}" placeholder="…apps.googleusercontent.com"></label><p class="muted" style="font-size:13px">Die Client-ID ist öffentlich. Gib hier niemals ein Passwort oder einen Client-Secret ein.</p><div class="modal-footer"><button class="btn" id="openSetupGuide">Hilfe öffnen</button><button class="btn" id="modalClose">Abbrechen</button><button class="btn primary" id="saveDriveSetup">Speichern</button></div>`);
+  $('#modalClose').onclick=closeModal;
+  $('#openSetupGuide').onclick=()=>location.href='./SETUP.html';
+  $('#saveDriveSetup').onclick=()=>{saveRuntimeConfig({googleClientId:$('#setupClientId').value.trim()});googleTokenClient=null;googleTokenClientFor='';closeModal();toast('Google-Einrichtung gespeichert.');renderDriveButton()};
 }
-async function driveMenu(){if(!driveConfigured())return showDriveSetup();openModal(`<h2>Google Drive</h2><p>Google Drive wird ausschließlich lesend verwendet. Originalbilder werden nicht verändert oder gelöscht.</p><div class="panel" style="margin:10px 0"><strong>${tokenValid()?'Verbunden':'Nicht verbunden'}</strong><div class="muted" style="font-size:12px;margin-top:4px">Sichere Anmeldung: Authorization Code + PKCE · Zugriffstoken nur für diese Sitzung</div></div><div style="display:grid;gap:8px">${!tokenValid()?'<button class="btn primary" id="connectDrive">Mit Google Drive verbinden</button>':'<button class="btn primary" id="chooseDrive">Drive-Fotoordner hinzufügen</button><button class="btn" id="forgetDrive">Verbindung für diese Sitzung trennen</button>'}</div><div class="modal-footer"><button class="btn" id="modalClose">Schließen</button></div>`);$('#modalClose').onclick=closeModal;$('#connectDrive')?.addEventListener('click',()=>{closeModal();connectDrive('drive-menu').catch(e=>toast(e.message,4500))});$('#chooseDrive')?.addEventListener('click',()=>chooseDriveFolder());$('#forgetDrive')?.addEventListener('click',()=>{state.driveToken='';state.driveExpiresAt=0;sessionStorage.removeItem('fa_drive_token');sessionStorage.removeItem('fa_drive_exp');renderDriveButton();closeModal();toast('Drive-Verbindung für diese Sitzung getrennt.')})}
+async function driveMenu(){
+  if(!driveConfigured())return showDriveSetup();
+  openModal(`<h2>Google Drive</h2><p>Das Fotoarchiv kann deine Originalfotos in Google Drive <strong>nur lesen</strong>, nicht löschen oder verändern.</p><div class="panel" style="margin:10px 0"><strong>${tokenValid()?'Verbunden':'Nicht verbunden'}</strong><div class="muted" style="font-size:12px;margin-top:4px">Google Identity Services · Zugriffstoken nur im Arbeitsspeicher</div></div><div style="display:grid;gap:8px">${!tokenValid()?'<button class="btn primary" id="connectDrive">Mit Google Drive verbinden</button>':'<button class="btn primary" id="chooseDrive">Drive-Fotoordner hinzufügen</button><button class="btn" id="forgetDrive">Verbindung trennen</button>'}</div><div class="modal-footer"><button class="btn" id="modalClose">Schließen</button></div>`);
+  $('#modalClose').onclick=closeModal;
+  $('#connectDrive')?.addEventListener('click',()=>connectDrive('drive-menu'));
+  $('#chooseDrive')?.addEventListener('click',()=>chooseDriveFolder());
+  $('#forgetDrive')?.addEventListener('click',()=>{
+    if(state.driveToken&&window.google?.accounts?.oauth2?.revoke){
+      window.google.accounts.oauth2.revoke(state.driveToken,()=>{});
+    }
+    state.driveToken='';state.driveExpiresAt=0;renderDriveButton();closeModal();toast('Drive-Verbindung getrennt.');
+  });
+}
 async function listDriveFolders(parent='root'){const q=encodeURIComponent(`'${String(parent).replace(/'/g,"\\'")}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`),fields=encodeURIComponent('files(id,name),nextPageToken');let token='',out=[];do{const u=`https://www.googleapis.com/drive/v3/files?q=${q}&pageSize=1000&orderBy=name&fields=${fields}&spaces=drive${token?`&pageToken=${encodeURIComponent(token)}`:''}`;const d=await driveJSON(u);out.push(...(d.files||[]));token=d.nextPageToken||''}while(token);return out}
 async function chooseDriveFolder(existingId=null,current='root',crumbs=[]){try{busy(true);const folders=await listDriveFolders(current);busy(false);openModal(`<h2>Drive-Ordner auswählen</h2><div class="muted" style="margin-bottom:10px">${esc(['Meine Ablage',...crumbs.map(x=>x.name)].join(' › '))}</div><div style="display:grid;gap:6px">${folders.length?folders.map(f=>`<button class="btn" data-folder="${f.id}" data-name="${esc(f.name)}" style="justify-content:flex-start">📁 ${esc(f.name)}</button>`).join(''):'<div class="muted">Keine Unterordner.</div>'}</div><div class="modal-footer">${crumbs.length?'<button class="btn" id="driveBack">← Zurück</button>':''}<button class="btn" id="modalClose">Abbrechen</button>${current!=='root'?'<button class="btn primary" id="useFolder">Diesen Ordner verwenden</button>':''}</div>`);$('#modalClose').onclick=closeModal;$$('[data-folder]').forEach(b=>b.onclick=()=>chooseDriveFolder(existingId,b.dataset.folder,[...crumbs,{id:b.dataset.folder,name:b.dataset.name}]));$('#driveBack')?.addEventListener('click',()=>{const c=crumbs.slice(0,-1),p=c.length?c.at(-1).id:'root';chooseDriveFolder(existingId,p,c)});$('#useFolder')?.addEventListener('click',async()=>{const name=crumbs.at(-1)?.name||'Drive-Fotoordner';let lib=existingId?state.libraries.find(x=>x.id===existingId):null;if(lib){lib.driveFolderId=current;lib.name=name}else{lib={id:uid(),name,sourceType:'drive',driveFolderId:current,createdAt:Date.now(),lastScanAt:null};state.libraries.push(lib)}await put('libraries',lib);closeModal();await scanDriveLibrary(lib.id)})}catch(e){busy(false);console.error(e);toast(`Drive-Ordner konnten nicht geladen werden: ${e.message}`,5000)}}
 async function listChildren(parent){let token='',out=[];const q=encodeURIComponent(`'${String(parent).replace(/'/g,"\\'")}' in parents and trashed=false`),fields=encodeURIComponent('nextPageToken,files(id,name,mimeType,size,modifiedTime,createdTime,md5Checksum,thumbnailLink,imageMediaMetadata(time,width,height))');do{const u=`https://www.googleapis.com/drive/v3/files?q=${q}&pageSize=1000&fields=${fields}&spaces=drive&orderBy=folder,name${token?`&pageToken=${encodeURIComponent(token)}`:''}`;const d=await driveJSON(u);out.push(...(d.files||[]));token=d.nextPageToken||''}while(token);return out}
@@ -79,7 +123,7 @@ function renderTags(){const inc=[...state.activeTags].map(t=>`<span class="chip 
 function removeEq(set,t){const k=norm(t);for(const x of [...set])if(norm(x)===k)set.delete(x)}
 function renderProjectFilter(){const s=$('#projectFilter'),v=state.projectFilterId;s.innerHTML='<option value="">Alle Fotos</option>'+state.projects.slice().sort((a,b)=>a.name.localeCompare(b.name,'de')).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');s.value=v}
 function renderQuick(){const q=state.favorites.filter(f=>f.quick).sort((a,b)=>(a.quickOrder??999)-(b.quickOrder??999)),b=$('#quickbar');b.classList.toggle('show',!!q.length);b.innerHTML=q.length?'<span class="quick-label">Schnellfilter</span>'+q.map(f=>`<button class="quick-btn" data-q="${f.id}">${esc(f.name)}</button>`).join(''):'';$$('[data-q]').forEach(x=>x.onclick=()=>applyFilter(state.favorites.find(f=>f.id===x.dataset.q).filter))}
-function renderLibrary(){renderTags();renderQuick();renderProjectFilter();const a=filtered(),slice=a.slice(0,state.renderLimit);$('#resultCount').textContent=`${fmt.format(a.length)} ${a.length===1?'Foto':'Fotos'}`;const c=$('#libraryContent');if(!state.libraries.length){c.innerHTML=`<div class="empty"><h2>Google-Drive-Fotoordner hinzufügen</h2><p>Die PWA speichert Tags, Favoriten und Fotoabende auf diesem Tablet. Die Originalfotos bleiben in Google Drive.</p><button class="btn primary" id="emptyDrive">☁ Google Drive verbinden</button></div>`;$('#emptyDrive').onclick=()=>{if(tokenValid())chooseDriveFolder();else connectDrive('choose-folder').catch(e=>toast(e.message,4500))};return}if(!a.length){c.innerHTML=`<div class="empty"><h2>Keine Fotos gefunden</h2><p>Für die aktuellen Filter gibt es keine Treffer.</p><button class="btn" id="clearFiltersBtn">Filter zurücksetzen</button></div>`;$('#clearFiltersBtn').onclick=clearFilters;return}c.innerHTML=`<div class="gallery ${state.listView?'list':''}" id="gallery">${slice.map(photoCard).join('')}</div>${a.length>slice.length?'<div style="text-align:center;padding:18px"><button class="btn" id="morePhotos">Weitere anzeigen</button></div>':''}`;$$('#gallery .photo-card').forEach(x=>x.onclick=()=>toggleSelect(x.dataset.id));$('#morePhotos')?.addEventListener('click',()=>{state.renderLimit+=PAGE_SIZE;renderLibrary()});hydrateThumbs(slice)}
+function renderLibrary(){renderTags();renderQuick();renderProjectFilter();const a=filtered(),slice=a.slice(0,state.renderLimit);$('#resultCount').textContent=`${fmt.format(a.length)} ${a.length===1?'Foto':'Fotos'}`;const c=$('#libraryContent');if(!state.libraries.length){c.innerHTML=`<div class="empty"><h2>Google-Drive-Fotoordner hinzufügen</h2><p>Die PWA speichert Tags, Favoriten und Fotoabende auf diesem Tablet. Die Originalfotos bleiben in Google Drive.</p><button class="btn primary" id="emptyDrive">☁ Google Drive verbinden</button></div>`;$('#emptyDrive').onclick=()=>{if(tokenValid())chooseDriveFolder();else connectDrive('choose-folder')};return}if(!a.length){c.innerHTML=`<div class="empty"><h2>Keine Fotos gefunden</h2><p>Für die aktuellen Filter gibt es keine Treffer.</p><button class="btn" id="clearFiltersBtn">Filter zurücksetzen</button></div>`;$('#clearFiltersBtn').onclick=clearFilters;return}c.innerHTML=`<div class="gallery ${state.listView?'list':''}" id="gallery">${slice.map(photoCard).join('')}</div>${a.length>slice.length?'<div style="text-align:center;padding:18px"><button class="btn" id="morePhotos">Weitere anzeigen</button></div>':''}`;$$('#gallery .photo-card').forEach(x=>x.onclick=()=>toggleSelect(x.dataset.id));$('#morePhotos')?.addEventListener('click',()=>{state.renderLimit+=PAGE_SIZE;renderLibrary()});hydrateThumbs(slice)}
 function toggleSelect(id){state.selected.has(id)?state.selected.delete(id):state.selected.add(id);renderLibrary();renderSelection()}
 function renderSelection(){const n=state.selected.size;$('#selectionBar').classList.toggle('show',n>0);$('#selectionCount').textContent=`${n} ausgewählt`}
 async function addBulk(){const tags=splitTags($('#bulkTagInput').value);if(!tags.length)return;const ch=[];for(const p of state.photos)if(state.selected.has(p.id)){for(const t of tags)if(!p.tags.some(x=>norm(x)===norm(t)))p.tags.push(t);ch.push(p)}await putMany('photos',ch);$('#bulkTagInput').value='';renderAll();toast('Tag(s) hinzugefügt.')}
@@ -120,12 +164,12 @@ function switchView(v){state.activeView=v;$$('.view').forEach(x=>x.classList.tog
 function syncControls(){$('#searchInput').value=state.search;$('#tagModeSelect').value=state.tagMode;$('#yearFrom').value=state.yearFrom;$('#yearTo').value=state.yearTo;$('#tagState').value=state.tagState;$('#sortSelect').value=state.sort;renderProjectFilter();$('#projectFilter').value=state.projectFilterId}
 function renderAll(){renderLibrary();renderFavorites();renderProjects();renderDashboard();renderSelection();renderDriveButton()}
 function bind(){
-  $$('nav button').forEach(b=>b.onclick=()=>switchView(b.dataset.view));$('#installBtn').onclick=installApp;$('#driveBtn').onclick=driveMenu;$('#moreBtn').onclick=moreMenu;$('#addDriveFolderBtn').onclick=()=>{if(tokenValid())chooseDriveFolder();else connectDrive('choose-folder').catch(e=>toast(e.message,4500))};$('#modalBack').onclick=e=>{if(e.target===$('#modalBack'))closeModal()};
+  $$('nav button').forEach(b=>b.onclick=()=>switchView(b.dataset.view));$('#installBtn').onclick=installApp;$('#driveBtn').onclick=driveMenu;$('#moreBtn').onclick=moreMenu;$('#addDriveFolderBtn').onclick=()=>{if(tokenValid())chooseDriveFolder();else connectDrive('choose-folder')};$('#modalBack').onclick=e=>{if(e.target===$('#modalBack'))closeModal()};
   $('#searchInput').oninput=e=>{state.search=e.target.value;renderLibrary()};
   const addTag=(input,mode)=>{const ts=splitTags(input.value);for(const t of ts){removeEq(mode==='inc'?state.excludedTags:state.activeTags,t);const s=mode==='inc'?state.activeTags:state.excludedTags;removeEq(s,t);s.add(t)}input.value='';renderLibrary()};
   $('#filterTagInput').onkeydown=e=>{if(e.key==='Enter'||e.key===','){e.preventDefault();addTag(e.target,'inc')}};$('#excludeTagInput').onkeydown=e=>{if(e.key==='Enter'||e.key===','){e.preventDefault();addTag(e.target,'exc')}};$('#tagModeSelect').onchange=e=>{state.tagMode=e.target.value;renderLibrary()};$('#yearFrom').oninput=e=>{state.yearFrom=e.target.value;renderLibrary()};$('#yearTo').oninput=e=>{state.yearTo=e.target.value;renderLibrary()};$('#tagState').onchange=e=>{state.tagState=e.target.value;renderLibrary()};$('#projectFilter').onchange=e=>{state.projectFilterId=e.target.value;renderLibrary()};$('#sortSelect').onchange=e=>{state.sort=e.target.value;renderLibrary()};$('#viewToggle').onclick=()=>{state.listView=!state.listView;renderLibrary()};$('#saveFilterBtn').onclick=saveFilter;$('#manageQuickFilters').onclick=manageQuick;
   $('#bulkTagAdd').onclick=addBulk;$('#bulkTagInput').onkeydown=e=>{if(e.key==='Enter')addBulk()};$('#bulkTagRemove').onclick=removeBulkMenu;$('#createProjectBtn').onclick=projectChoice;$('#clearSelection').onclick=()=>{state.selected.clear();renderLibrary();renderSelection()};$('#restoreInput').onchange=e=>{const f=e.target.files?.[0];if(f)restore(f);e.target.value=''};
 }
-async function init(){if(!window.isSecureContext)$('#httpsNotice').hidden=false;state.driveToken=sessionStorage.getItem('fa_drive_token')||'';state.driveExpiresAt=Number(sessionStorage.getItem('fa_drive_exp')||0);state.db=await openDB();bind();await loadData();syncControls();if('serviceWorker'in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(console.error);const qp=new URLSearchParams(location.search);if(qp.get('oauth')==='ok'){history.replaceState({},'',location.pathname+location.hash);toast('Google Drive ist verbunden.');const action=sessionStorage.getItem('fa_after_oauth')||'';sessionStorage.removeItem('fa_after_oauth');if(action==='choose-folder')setTimeout(()=>chooseDriveFolder(),500);else if(action==='drive-menu')setTimeout(()=>driveMenu(),500)}else if(!localStorage.getItem('fa_intro_seen')){localStorage.setItem('fa_intro_seen','1');setTimeout(help,450)}}
+async function init(){if(window.matchMedia?.('(display-mode: standalone)').matches)$('#installBtn').hidden=true;if(!window.isSecureContext)$('#httpsNotice').hidden=false;sessionStorage.removeItem('fa_drive_token');sessionStorage.removeItem('fa_drive_exp');state.db=await openDB();bind();await loadData();syncControls();if('serviceWorker'in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(console.error);if(!localStorage.getItem('fa_intro_seen')){localStorage.setItem('fa_intro_seen','1');setTimeout(help,450)}}
 init().catch(e=>{console.error(e);toast('Fotoarchiv konnte nicht gestartet werden.',5000)});
 })();
