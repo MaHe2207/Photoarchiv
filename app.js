@@ -1,15 +1,22 @@
 (()=>{'use strict';
-const APP_VERSION='4.2.0',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
+const APP_VERSION='4.2.1',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)],fmt=new Intl.NumberFormat('de-DE'),fmtDate=new Intl.DateTimeFormat('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'});
 const state={db:null,photos:[],libraries:[],favorites:[],projects:[],selected:new Set(),activeTags:new Set(),excludedTags:new Set(),tagMode:'and',search:'',yearFrom:'',yearTo:'',tagState:'all',projectFilterId:'',sort:'dateDesc',listView:false,renderLimit:PAGE_SIZE,activeView:'library',activeProjectId:null,toastTimer:null,driveToken:'',driveExpiresAt:0,installPrompt:null,thumbLoading:false};
 function readRuntimeConfig(){
+  const packaged=window.FOTOARCHIV_CONFIG||{};
   let saved={};try{saved=JSON.parse(localStorage.getItem('fa_runtime_config')||'{}')||{}}catch{}
-  return {...(window.FOTOARCHIV_CONFIG||{}),googleClientId:saved.googleClientId||(window.FOTOARCHIV_CONFIG?.googleClientId||'')};
+  // Ein Client aus der vorigen Google-Cloud-Projektkonfiguration darf die
+  // neue, ausgelieferte Client-ID nicht unbemerkt überschreiben.
+  const userOverride=saved.configBaseClientId===packaged.googleClientId ? saved.googleClientId : '';
+  return {...packaged,googleClientId:userOverride||packaged.googleClientId||''};
 }
 let cfg=readRuntimeConfig();
 function saveRuntimeConfig(next){
   cfg={...cfg,...next};
-  localStorage.setItem('fa_runtime_config',JSON.stringify({googleClientId:cfg.googleClientId||''}));
+  localStorage.setItem('fa_runtime_config',JSON.stringify({
+    googleClientId:cfg.googleClientId||'',
+    configBaseClientId:window.FOTOARCHIV_CONFIG?.googleClientId||''
+  }));
 }
 function uid(){return crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now().toString(36)}
 function esc(s=''){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
