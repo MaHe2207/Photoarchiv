@@ -1,7 +1,7 @@
 (()=>{'use strict';
-const APP_VERSION='4.2.1',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
+const APP_VERSION='4.2.2',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)],fmt=new Intl.NumberFormat('de-DE'),fmtDate=new Intl.DateTimeFormat('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'});
-const state={db:null,photos:[],libraries:[],favorites:[],projects:[],selected:new Set(),activeTags:new Set(),excludedTags:new Set(),tagMode:'and',search:'',yearFrom:'',yearTo:'',tagState:'all',projectFilterId:'',sort:'dateDesc',listView:false,renderLimit:PAGE_SIZE,activeView:'library',activeProjectId:null,toastTimer:null,driveToken:'',driveExpiresAt:0,installPrompt:null,thumbLoading:false};
+const state={db:null,photos:[],libraries:[],favorites:[],projects:[],selected:new Set(),activeTags:new Set(),excludedTags:new Set(),tagMode:'and',search:'',yearFrom:'',yearTo:'',tagState:'all',projectFilterId:'',sort:'dateDesc',listView:false,renderLimit:PAGE_SIZE,activeView:'library',activeProjectId:null,toastTimer:null,driveToken:'',driveExpiresAt:0,installPrompt:null,thumbLoading:false,thumbFailed:new Map(),thumbUrls:new Map(),thumbErrorNotified:false};
 function readRuntimeConfig(){
   const packaged=window.FOTOARCHIV_CONFIG||{};
   let saved={};try{saved=JSON.parse(localStorage.getItem('fa_runtime_config')||'{}')||{}}catch{}
@@ -42,7 +42,10 @@ async function getAll(n){const t=state.db.transaction(n,'readonly');return reqP(
 async function put(n,o){const t=state.db.transaction(n,'readwrite');t.objectStore(n).put(o);await txP(t)}
 async function putMany(n,a){if(!a.length)return;const t=state.db.transaction(n,'readwrite'),s=t.objectStore(n);a.forEach(x=>s.put(x));await txP(t)}
 async function del(n,id){const t=state.db.transaction(n,'readwrite');t.objectStore(n).delete(id);await txP(t)}
-async function loadData(){[state.photos,state.libraries,state.favorites,state.projects]=await Promise.all(['photos','libraries','favorites','projects'].map(getAll));state.photos.forEach(p=>{p.tags=rawTags(p.tags).map(clean).filter(Boolean)});state.favorites.forEach((f,i)=>{f.filter||={};f.filter.excludeTags||=[];f.filter.tagMode=f.filter.tagMode==='or'?'or':'and';if(f.quickOrder==null)f.quickOrder=i});renderAll()}
+async function loadData(){[state.photos,state.libraries,state.favorites,state.projects]=await Promise.all(['photos','libraries','favorites','projects'].map(getAll));state.photos.forEach(p=>{p.tags=rawTags(p.tags).map(clean).filter(Boolean)});
+  const currentIds=new Set(state.photos.map(p=>p.id));
+  for(const [id,cached] of state.thumbUrls)if(!currentIds.has(id)){URL.revokeObjectURL(cached.url);state.thumbUrls.delete(id)}
+  state.favorites.forEach((f,i)=>{f.filter||={};f.filter.excludeTags||=[];f.filter.tagMode=f.filter.tagMode==='or'?'or':'and';if(f.quickOrder==null)f.quickOrder=i});renderAll()}
 
 // PWA installation
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();state.installPrompt=e;$('#installBtn').hidden=false});
@@ -72,7 +75,7 @@ function connectDrive(after='drive-menu'){
           }
           state.driveToken=response.access_token;
           state.driveExpiresAt=Date.now()+Math.max(0,Number(response.expires_in||3600))*1000;
-          renderDriveButton();closeModal();toast('Google Drive ist verbunden.');
+          state.thumbFailed.clear();state.thumbErrorNotified=false;renderDriveButton();closeModal();toast('Google Drive ist verbunden.');renderLibrary();
           if(requestedDriveAction==='choose-folder') chooseDriveFolder();
           else driveMenu();
         },
@@ -119,12 +122,88 @@ async function listDriveFolders(parent='root'){const q=encodeURIComponent(`'${St
 async function chooseDriveFolder(existingId=null,current='root',crumbs=[]){try{busy(true);const folders=await listDriveFolders(current);busy(false);openModal(`<h2>Drive-Ordner auswählen</h2><div class="muted" style="margin-bottom:10px">${esc(['Meine Ablage',...crumbs.map(x=>x.name)].join(' › '))}</div><div style="display:grid;gap:6px">${folders.length?folders.map(f=>`<button class="btn" data-folder="${f.id}" data-name="${esc(f.name)}" style="justify-content:flex-start">📁 ${esc(f.name)}</button>`).join(''):'<div class="muted">Keine Unterordner.</div>'}</div><div class="modal-footer">${crumbs.length?'<button class="btn" id="driveBack">← Zurück</button>':''}<button class="btn" id="modalClose">Abbrechen</button>${current!=='root'?'<button class="btn primary" id="useFolder">Diesen Ordner verwenden</button>':''}</div>`);$('#modalClose').onclick=closeModal;$$('[data-folder]').forEach(b=>b.onclick=()=>chooseDriveFolder(existingId,b.dataset.folder,[...crumbs,{id:b.dataset.folder,name:b.dataset.name}]));$('#driveBack')?.addEventListener('click',()=>{const c=crumbs.slice(0,-1),p=c.length?c.at(-1).id:'root';chooseDriveFolder(existingId,p,c)});$('#useFolder')?.addEventListener('click',async()=>{const name=crumbs.at(-1)?.name||'Drive-Fotoordner';let lib=existingId?state.libraries.find(x=>x.id===existingId):null;if(lib){lib.driveFolderId=current;lib.name=name}else{lib={id:uid(),name,sourceType:'drive',driveFolderId:current,createdAt:Date.now(),lastScanAt:null};state.libraries.push(lib)}await put('libraries',lib);closeModal();await scanDriveLibrary(lib.id)})}catch(e){busy(false);console.error(e);toast(`Drive-Ordner konnten nicht geladen werden: ${e.message}`,5000)}}
 async function listChildren(parent){let token='',out=[];const q=encodeURIComponent(`'${String(parent).replace(/'/g,"\\'")}' in parents and trashed=false`),fields=encodeURIComponent('nextPageToken,files(id,name,mimeType,size,modifiedTime,createdTime,md5Checksum,thumbnailLink,imageMediaMetadata(time,width,height))');do{const u=`https://www.googleapis.com/drive/v3/files?q=${q}&pageSize=1000&fields=${fields}&spaces=drive&orderBy=folder,name${token?`&pageToken=${encodeURIComponent(token)}`:''}`;const d=await driveJSON(u);out.push(...(d.files||[]));token=d.nextPageToken||''}while(token);return out}
 async function scanDriveFolder(root){const files=[],q=[{id:root,prefix:''}];while(q.length){const c=q.shift(),items=await listChildren(c.id);for(const f of items){if(f.mimeType==='application/vnd.google-apps.folder')q.push({id:f.id,prefix:`${c.prefix}${f.name}/`});else if((f.mimeType||'').startsWith('image/'))files.push({...f,relativePath:`${c.prefix}${f.name}`})}}return files}
-async function scanDriveLibrary(id){const lib=state.libraries.find(x=>x.id===id);if(!lib)return;busy(true);try{const entries=await scanDriveFolder(lib.driveFolderId),existing=state.photos.filter(p=>p.libraryId===id),by=new Map(existing.map(p=>[p.driveFileId,p])),seen=new Set(),changed=[];let added=0,moved=0;for(const e of entries){let p=by.get(e.id),lm=e.modifiedTime?Date.parse(e.modifiedTime):Date.now(),cap=e.imageMediaMetadata?.time?Date.parse(e.imageMediaMetadata.time):(e.createdTime?Date.parse(e.createdTime):lm);if(p){seen.add(p.id);if(p.relativePath!==e.relativePath)moved++;Object.assign(p,{fileName:e.name,relativePath:e.relativePath,size:Number(e.size||0),lastModified:lm,fileDate:lm,capturedAt:Number.isFinite(cap)?cap:lm,hash:e.md5Checksum?`md5:${e.md5Checksum}`:`drive:${e.id}`,driveThumbnailLink:e.thumbnailLink||p.driveThumbnailLink||null,mimeType:e.mimeType,missing:false});changed.push(p)}else{p={id:uid(),libraryId:id,sourceType:'drive',driveFileId:e.id,fileName:e.name,relativePath:e.relativePath,size:Number(e.size||0),lastModified:lm,fileDate:lm,capturedAt:Number.isFinite(cap)?cap:lm,hash:e.md5Checksum?`md5:${e.md5Checksum}`:`drive:${e.id}`,driveThumbnailLink:e.thumbnailLink||null,mimeType:e.mimeType,tags:[],thumbnail:null,missing:false,createdAt:Date.now()};state.photos.push(p);changed.push(p);seen.add(p.id);added++}}existing.forEach(p=>{if(!seen.has(p.id)){p.missing=true;changed.push(p)}});lib.lastScanAt=Date.now();await Promise.all([putMany('photos',changed),put('libraries',lib)]);await loadData();toast(`Drive aktualisiert${added||moved?`: ${added} neu, ${moved} verschoben/umbenannt`:''}.`)}catch(e){console.error(e);toast(`Drive konnte nicht aktualisiert werden: ${e.message}`,5000)}finally{busy(false)}}
-async function driveBlob(p,thumb=false){let url=thumb&&p.driveThumbnailLink?p.driveThumbnailLink:`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.driveFileId)}?alt=media`;const r=await driveFetch(url);if(!r.ok)throw new Error(`Download HTTP ${r.status}`);return r.blob()}
-async function hydrateThumbs(photos){if(state.thumbLoading)return;const q=photos.filter(p=>!p.thumbnail&&!p.missing&&p.driveFileId).slice(0,40);if(!q.length)return;state.thumbLoading=true;let n=0;const workers=Array.from({length:Math.min(4,q.length)},async()=>{while(q.length){const p=q.shift();try{let b=await driveBlob(p,true);if(!b.type.startsWith('image/'))b=await driveBlob(p,false);p.thumbnail=b;await put('photos',p);n++}catch{}}});await Promise.all(workers);state.thumbLoading=false;if(n)renderLibrary()}
+async function scanDriveLibrary(id){state.thumbFailed.clear();state.thumbErrorNotified=false;const lib=state.libraries.find(x=>x.id===id);if(!lib)return;busy(true);try{const entries=await scanDriveFolder(lib.driveFolderId),existing=state.photos.filter(p=>p.libraryId===id),by=new Map(existing.map(p=>[p.driveFileId,p])),seen=new Set(),changed=[];let added=0,moved=0;for(const e of entries){let p=by.get(e.id),lm=e.modifiedTime?Date.parse(e.modifiedTime):Date.now(),cap=e.imageMediaMetadata?.time?Date.parse(e.imageMediaMetadata.time):(e.createdTime?Date.parse(e.createdTime):lm);if(p){seen.add(p.id);if(p.relativePath!==e.relativePath)moved++;Object.assign(p,{fileName:e.name,relativePath:e.relativePath,size:Number(e.size||0),lastModified:lm,fileDate:lm,capturedAt:Number.isFinite(cap)?cap:lm,hash:e.md5Checksum?`md5:${e.md5Checksum}`:`drive:${e.id}`,driveThumbnailLink:e.thumbnailLink||p.driveThumbnailLink||null,mimeType:e.mimeType,missing:false});changed.push(p)}else{p={id:uid(),libraryId:id,sourceType:'drive',driveFileId:e.id,fileName:e.name,relativePath:e.relativePath,size:Number(e.size||0),lastModified:lm,fileDate:lm,capturedAt:Number.isFinite(cap)?cap:lm,hash:e.md5Checksum?`md5:${e.md5Checksum}`:`drive:${e.id}`,driveThumbnailLink:e.thumbnailLink||null,mimeType:e.mimeType,tags:[],thumbnail:null,missing:false,createdAt:Date.now()};state.photos.push(p);changed.push(p);seen.add(p.id);added++}}existing.forEach(p=>{if(!seen.has(p.id)){p.missing=true;changed.push(p)}});lib.lastScanAt=Date.now();await Promise.all([putMany('photos',changed),put('libraries',lib)]);await loadData();toast(`Drive aktualisiert${added||moved?`: ${added} neu, ${moved} verschoben/umbenannt`:''}.`)}catch(e){console.error(e);toast(`Drive konnte nicht aktualisiert werden: ${e.message}`,5000)}finally{busy(false)}}
+// Die Drive-Felder thumbnailLink verweisen oft auf googleusercontent.com.
+// Laut Google ist das im Browser durch CORS nicht verlaesslich. Ausschliesslich
+// die offizielle Drive-API unter www.googleapis.com (Bearer-Token) verwenden.
+async function driveBlob(p){
+  const url=`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.driveFileId)}?alt=media`;
+  const r=await driveFetch(url);
+  if(!r.ok){let detail='';try{const d=await r.json();detail=d?.error?.message||''}catch{}throw new Error(`Drive HTTP ${r.status}${detail?': '+detail:''}`)}
+  return r.blob();
+}
+// Originalfotos werden nur im Arbeitsspeicher decodiert. In IndexedDB liegen
+// lediglich kleine JPEG-Vorschaubilder (maximal 480 Pixel Kantenlaenge).
+async function makeLocalThumbnail(blob){
+  if(!blob?.size)throw new Error('Bilddatei ist leer.');
+  let img,objectURL='';
+  try{
+    if(typeof createImageBitmap==='function'){
+      try{img=await createImageBitmap(blob)}catch{}
+    }
+    if(!img){
+      objectURL=URL.createObjectURL(blob);
+      img=new Image();
+      img.src=objectURL;
+      await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('Dieses Bildformat kann das Geraet nicht anzeigen.'));if(img.complete){if(img.naturalWidth)resolve();else reject(new Error('Bild kann nicht gelesen werden.'))}});
+    }
+    const w=img.width||img.naturalWidth,h=img.height||img.naturalHeight;
+    if(!w||!h)throw new Error('Bildgroesse nicht lesbar.');
+    const ratio=Math.min(1,480/Math.max(w,h));
+    const canvas=document.createElement('canvas');
+    canvas.width=Math.max(1,Math.round(w*ratio));canvas.height=Math.max(1,Math.round(h*ratio));
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx)throw new Error('Bildvorschau wird nicht unterstuetzt.');
+    ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    const thumb=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.78));
+    if(!thumb?.size)throw new Error('Vorschaubild konnte nicht erstellt werden.');
+    return thumb;
+  }finally{
+    if(typeof img?.close==='function')img.close();
+    if(objectURL)URL.revokeObjectURL(objectURL);
+  }
+}
+async function hydrateThumbs(photos){
+  if(state.thumbLoading||!tokenValid())return;
+  const q=photos.filter(p=>!p.thumbnail&&!p.missing&&p.driveFileId&&!state.thumbFailed.has(p.driveFileId)).slice(0,12);
+  if(!q.length)return;
+  state.thumbLoading=true;
+  let n=0;const errors=[];
+  try{
+    const workers=Array.from({length:Math.min(2,q.length)},async()=>{
+      while(q.length){
+        const p=q.shift();
+        try{
+          const blob=await driveBlob(p);
+          p.thumbnail=await makeLocalThumbnail(blob);
+          await put('photos',p);n++;
+        }catch(err){
+          state.thumbFailed.set(p.driveFileId,err.message||'Unbekannter Fehler');errors.push(err.message||'Unbekannter Fehler');
+          console.warn('Vorschau fehlgeschlagen:',p.fileName,err);
+        }
+      }
+    });
+    await Promise.all(workers);
+  }finally{state.thumbLoading=false}
+  if(n)renderLibrary();
+  else if(errors.length&&!state.thumbErrorNotified){
+    state.thumbErrorNotified=true;
+    toast('Vorschaubilder konnten nicht geladen werden: '+errors[0],8000);
+  }
+}
 
 function filtered(){let a=state.photos.slice(),q=norm(state.search);if(q)a=a.filter(p=>norm(p.fileName).includes(q)||norm(p.relativePath).includes(q)||rawTags(p.tags).some(t=>norm(t).includes(q)));if(state.activeTags.size){const t=[...state.activeTags];a=a.filter(p=>state.tagMode==='or'?hasAny(p,t):hasAll(p,t))}if(state.excludedTags.size){const t=[...state.excludedTags];a=a.filter(p=>!hasAny(p,t))}if(state.projectFilterId){const pr=state.projects.find(x=>x.id===state.projectFilterId),ids=new Set(pr?.photoIds||[]);a=a.filter(p=>ids.has(p.id))}const yf=parseInt(state.yearFrom),yt=parseInt(state.yearTo);if(Number.isFinite(yf))a=a.filter(p=>(yearOf(p)||0)>=yf);if(Number.isFinite(yt))a=a.filter(p=>(yearOf(p)||9999)<=yt);if(state.tagState==='untagged')a=a.filter(p=>!p.tags.length);if(state.tagState==='tagged')a=a.filter(p=>p.tags.length);const col=new Intl.Collator('de',{numeric:true,sensitivity:'base'});a.sort((x,y)=>state.sort==='dateAsc'?(x.capturedAt||0)-(y.capturedAt||0):state.sort==='nameAsc'?col.compare(x.fileName,y.fileName):state.sort==='nameDesc'?col.compare(y.fileName,x.fileName):state.sort==='tagsDesc'?y.tags.length-x.tags.length:(y.capturedAt||0)-(x.capturedAt||0));return a}
-function thumbURL(p){try{return p.thumbnail?URL.createObjectURL(p.thumbnail):''}catch{return''}}
+function thumbURL(p){
+  if(!p.thumbnail)return '';
+  try{
+    const previous=state.thumbUrls.get(p.id);
+    if(previous?.blob===p.thumbnail)return previous.url;
+    if(previous)URL.revokeObjectURL(previous.url);
+    const url=URL.createObjectURL(p.thumbnail);
+    state.thumbUrls.set(p.id,{blob:p.thumbnail,url});
+    return url;
+  }catch{return ''}
+}
 function photoCard(p){const u=thumbURL(p),tags=p.tags||[];return `<article class="photo-card ${state.selected.has(p.id)?'selected':''}" data-id="${p.id}"><div class="thumb">${u?`<img src="${u}" alt="">`:'<span class="fallback">▧</span>'}<button class="check">${state.selected.has(p.id)?'✓':''}</button></div><div class="card-body"><div><div class="filename">${esc(p.fileName)}</div><div class="meta">${esc(niceDate(p))}</div></div><div class="tags">${tags.slice(0,3).map(t=>`<span class="tag-mini">${esc(t)}</span>`).join('')}${tags.length>3?`<span class="tag-more">+${tags.length-3}</span>`:''}</div></div></article>`}
 function renderTags(){const inc=[...state.activeTags].map(t=>`<span class="chip active">${esc(t)} <button data-inc="${esc(t)}">×</button></span>`),exc=[...state.excludedTags].map(t=>`<span class="chip exclude">nicht ${esc(t)} <button data-exc="${esc(t)}">×</button></span>`);$('#activeTagChips').innerHTML=[...inc,...exc].join('');$$('[data-inc]').forEach(b=>b.onclick=()=>{removeEq(state.activeTags,b.dataset.inc);renderLibrary()});$$('[data-exc]').forEach(b=>b.onclick=()=>{removeEq(state.excludedTags,b.dataset.exc);renderLibrary()});$('#tagSuggestions').innerHTML=allTags().map(t=>`<option value="${esc(t)}"></option>`).join('')}
 function removeEq(set,t){const k=norm(t);for(const x of [...set])if(norm(x)===k)set.delete(x)}
