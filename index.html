@@ -10,7 +10,7 @@
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="styles.css">
-  <title>Fotoarchiv PWA 4.2.2</title>
+  <title>Fotoarchiv PWA 4.2.3</title>
 </head>
 <body>
 <div class="app">
@@ -46,8 +46,14 @@
             <option value="and">UND · alle</option>
             <option value="or">ODER · einer reicht</option>
           </select>
-          <input class="tag-input" id="filterTagInput" list="tagSuggestions" placeholder="Tag einschließen …">
-          <input class="tag-input" id="excludeTagInput" list="tagSuggestions" placeholder="Tag ausschließen …">
+          <div class="tag-filter-entry">
+            <input class="tag-input" id="filterTagInput" list="tagSuggestions" placeholder="Tag einschließen …" aria-label="Tag einschließen" autocomplete="off" enterkeyhint="done">
+            <button class="btn small" id="filterTagAdd" type="button" aria-label="Eingegebenen Tag einschließen">+ Hinzufügen</button>
+          </div>
+          <div class="tag-filter-entry">
+            <input class="tag-input" id="excludeTagInput" list="tagSuggestions" placeholder="Tag ausschließen …" aria-label="Tag ausschließen" autocomplete="off" enterkeyhint="done">
+            <button class="btn small" id="excludeTagAdd" type="button" aria-label="Eingegebenen Tag ausschließen">Ausschließen</button>
+          </div>
           <button class="btn small" id="saveFilterBtn">☆ Speichern</button>
         </div>
         <details class="advanced">
@@ -82,7 +88,7 @@
 </div>
 <div class="modal-back" id="modalBack"><div class="modal" id="modal"></div></div>
 <div class="toast" id="toast"></div>
-<div class="version-footer">Fotoarchiv PWA v4.2.2</div>
+<div class="version-footer">Fotoarchiv PWA v4.2.3</div>
 <input type="file" id="restoreInput" accept="application/json,.json" hidden>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="config.js"></script>

@@ -1,5 +1,5 @@
 (()=>{'use strict';
-const APP_VERSION='4.2.2',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
+const APP_VERSION='4.2.3',DB_NAME='FotoarchivPWA',DB_VERSION=1,PAGE_SIZE=180;
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)],fmt=new Intl.NumberFormat('de-DE'),fmtDate=new Intl.DateTimeFormat('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'});
 const state={db:null,photos:[],libraries:[],favorites:[],projects:[],selected:new Set(),activeTags:new Set(),excludedTags:new Set(),tagMode:'and',search:'',yearFrom:'',yearTo:'',tagState:'all',projectFilterId:'',sort:'dateDesc',listView:false,renderLimit:PAGE_SIZE,activeView:'library',activeProjectId:null,toastTimer:null,driveToken:'',driveExpiresAt:0,installPrompt:null,thumbLoading:false,thumbFailed:new Map(),thumbUrls:new Map(),thumbErrorNotified:false};
 function readRuntimeConfig(){
@@ -252,8 +252,43 @@ function renderAll(){renderLibrary();renderFavorites();renderProjects();renderDa
 function bind(){
   $$('nav button').forEach(b=>b.onclick=()=>switchView(b.dataset.view));$('#installBtn').onclick=installApp;$('#driveBtn').onclick=driveMenu;$('#moreBtn').onclick=moreMenu;$('#addDriveFolderBtn').onclick=()=>{if(tokenValid())chooseDriveFolder();else connectDrive('choose-folder')};$('#modalBack').onclick=e=>{if(e.target===$('#modalBack'))closeModal()};
   $('#searchInput').oninput=e=>{state.search=e.target.value;renderLibrary()};
-  const addTag=(input,mode)=>{const ts=splitTags(input.value);for(const t of ts){removeEq(mode==='inc'?state.excludedTags:state.activeTags,t);const s=mode==='inc'?state.activeTags:state.excludedTags;removeEq(s,t);s.add(t)}input.value='';renderLibrary()};
-  $('#filterTagInput').onkeydown=e=>{if(e.key==='Enter'||e.key===','){e.preventDefault();addTag(e.target,'inc')}};$('#excludeTagInput').onkeydown=e=>{if(e.key==='Enter'||e.key===','){e.preventDefault();addTag(e.target,'exc')}};$('#tagModeSelect').onchange=e=>{state.tagMode=e.target.value;renderLibrary()};$('#yearFrom').oninput=e=>{state.yearFrom=e.target.value;renderLibrary()};$('#yearTo').oninput=e=>{state.yearTo=e.target.value;renderLibrary()};$('#tagState').onchange=e=>{state.tagState=e.target.value;renderLibrary()};$('#projectFilter').onchange=e=>{state.projectFilterId=e.target.value;renderLibrary()};$('#sortSelect').onchange=e=>{state.sort=e.target.value;renderLibrary()};$('#viewToggle').onclick=()=>{state.listView=!state.listView;renderLibrary()};$('#saveFilterBtn').onclick=saveFilter;$('#manageQuickFilters').onclick=manageQuick;
+  // Mobile Tastaturen senden bei „Fertig“ bzw. Auswahl eines Datalist-Tags
+  // nicht immer einen verlässlichen Enter-Keydown. Darum gibt es sichtbare
+  // Anwendeknöpfe und zusätzlich eine Reaktion auf „change“.
+  const addTag=(input,mode)=>{
+    const ts=splitTags(input.value);
+    if(!ts.length)return false;
+    for(const t of ts){
+      removeEq(mode==='inc'?state.excludedTags:state.activeTags,t);
+      const set=mode==='inc'?state.activeTags:state.excludedTags;
+      removeEq(set,t);
+      set.add(t);
+    }
+    input.value='';
+    renderLibrary();
+    return true;
+  };
+  const bindTagEntry=(inputSelector,buttonSelector,mode)=>{
+    const input=$(inputSelector),button=$(buttonSelector);
+    button.onclick=()=>{addTag(input,mode)};
+    input.onkeydown=e=>{
+      if(e.isComposing||e.keyCode===229)return;
+      if(e.key==='Enter'||e.key===','||e.key===';'){
+        e.preventDefault();addTag(input,mode);
+      }
+    };
+    // Deckt Auswahl aus den nativen Vorschlägen und das Beenden der
+    // Bildschirmtastatur ab (auch ohne Enter-Taste).
+    input.onchange=()=>addTag(input,mode);
+  };
+  bindTagEntry('#filterTagInput','#filterTagAdd','inc');
+  bindTagEntry('#excludeTagInput','#excludeTagAdd','exc');
+  $('#tagModeSelect').onchange=e=>{state.tagMode=e.target.value;renderLibrary()};$('#yearFrom').oninput=e=>{state.yearFrom=e.target.value;renderLibrary()};$('#yearTo').oninput=e=>{state.yearTo=e.target.value;renderLibrary()};$('#tagState').onchange=e=>{state.tagState=e.target.value;renderLibrary()};$('#projectFilter').onchange=e=>{state.projectFilterId=e.target.value;renderLibrary()};$('#sortSelect').onchange=e=>{state.sort=e.target.value;renderLibrary()};$('#viewToggle').onclick=()=>{state.listView=!state.listView;renderLibrary()};$('#saveFilterBtn').onclick=()=>{
+    // Unbestätigte Eingaben vor dem Speichern noch übernehmen.
+    addTag($('#filterTagInput'),'inc');
+    addTag($('#excludeTagInput'),'exc');
+    saveFilter();
+  };$('#manageQuickFilters').onclick=manageQuick;
   $('#bulkTagAdd').onclick=addBulk;$('#bulkTagInput').onkeydown=e=>{if(e.key==='Enter')addBulk()};$('#bulkTagRemove').onclick=removeBulkMenu;$('#createProjectBtn').onclick=projectChoice;$('#clearSelection').onclick=()=>{state.selected.clear();renderLibrary();renderSelection()};$('#restoreInput').onchange=e=>{const f=e.target.files?.[0];if(f)restore(f);e.target.value=''};
 }
 async function init(){if(window.matchMedia?.('(display-mode: standalone)').matches)$('#installBtn').hidden=true;if(!window.isSecureContext)$('#httpsNotice').hidden=false;sessionStorage.removeItem('fa_drive_token');sessionStorage.removeItem('fa_drive_exp');state.db=await openDB();bind();await loadData();syncControls();if('serviceWorker'in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(console.error);if(!localStorage.getItem('fa_intro_seen')){localStorage.setItem('fa_intro_seen','1');setTimeout(help,450)}}
